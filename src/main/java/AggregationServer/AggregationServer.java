@@ -13,7 +13,15 @@ import shared.HTTPRequest;
 import shared.UrlManager;
 
 /**
- *
+ * The {@code AggregationServer} accepts connections from ContentServers and GETClients.
+ * It stores incoming weather station data (PUT requests) into JSON files, handles
+ * GET requests for current data, and synchronizes Lamport clocks across distributed services.
+ * <br></br>
+ * Features:
+ * Maintains Lamport clock for causal ordering
+ * Persists station data into JSON files with update counts
+ * Handles expiration of outdated files via a garbage collection thread
+ * Reloads persisted files and restores clocks after server restart
  */
 public class AggregationServer {
 
@@ -22,8 +30,12 @@ public class AggregationServer {
     public static int ServerLamportClock = 0;
     public static int ServerUpdateCount = 0;
 
-    // Constructor with Port
-
+    int GC_THREAD_SLEEP_TIME = 120_000;
+    /**
+     * Creates an {@code AggregationServer} bound to the specified port.
+     *
+     * @param port the port to bind the server socket
+     */
     public AggregationServer(int port) {
         try {
             serverSocket = new ServerSocket(port);
@@ -33,17 +45,22 @@ public class AggregationServer {
         }
     }
 
+    /**
+     * Loads existing JSON files from the working directory into memory.
+     * <p>
+     * - Ignores temporary files (ending with {@code -temp.json}).<br>
+     * - Updates {@code ServerLamportClock} and {@code ServerUpdateCount}
+     *   based on the maximum values found in files.
+     * </p>
+     */
     public void getExistingFiles() {
-        // load existing files
         File dir = new File(".");
-        // only look at json files
-        // ignore -temp.json files
-        File[] jsonFiles = dir.listFiles();
-        if (jsonFiles != null) {
+        File[] dirFiles = dir.listFiles();
+        if (dirFiles != null) {
             int maxUpdateCount = 0;
             int maxLamport = 0;
 
-            for (File file : jsonFiles) {
+            for (File file : dirFiles) {
                 String fileName = file.getName();
                 if (!fileName.endsWith(".json") || fileName.endsWith("-temp.json")) continue;
                 System.out.println("found file: " + fileName);
@@ -51,31 +68,48 @@ public class AggregationServer {
                 FileHandler handler = new FileHandler(stationId);
                 handler.readFromFile(stationId);
                 files.put(stationId, handler);
-                // track max counts
+
+                // track max counters
                 maxUpdateCount = Math.max(maxUpdateCount, handler.getGlobalUpdateCount());
                 maxLamport = Math.max(maxLamport, handler.getLamportClock());
 
                 System.out.printf("Loaded file for station %s (lamport=%d, updateCount=%d)\n",
                         stationId, handler.getLamportClock(), handler.getGlobalUpdateCount());
             }
-
-            // restore counters
+            // update server counters
             ServerUpdateCount = maxUpdateCount;
             ServerLamportClock = maxLamport;
         }
-        System.out.printf("Starting server with initial lamport: %d , updateCount: %d \n", ServerLamportClock, ServerUpdateCount);
+        System.out.printf("Starting server with initial lamport: %d , updateCount: %d \n",
+                ServerLamportClock, ServerUpdateCount);
     }
 
+    /**
+     * Starts the AggregationServer:
+     * <ul>
+     *   <li>Runs a garbage collector thread every 2 minutes to remove expired files</li>
+     *   <li>Accepts incoming client connections</li>
+     *   <li>Delegates each connection to a {@link handleConnection} thread</li>
+     * </ul>
+     *
+     * <p>This method blocks indefinitely until terminated.</p>
+     */
     public void run() {
         getExistingFiles();
-        // garbage collection thread to delete files
+
+        // Garbage collection thread to delete files
         new Thread(() -> {
             while (true) {
                 try {
-                    Thread.sleep(120_000); // every 2 minutes
+                    // runs every 2 minutes
+                    Thread.sleep(GC_THREAD_SLEEP_TIME);
+
+                    // check every current file handler object
                     for (ConcurrentHashMap.Entry<String, FileHandler> entry : files.entrySet()) {
                         String id = entry.getKey();
                         FileHandler handler = entry.getValue();
+
+                        // using write lock to avoid having the object updated while deleting
                         handler.rwLock.writeLock().lock();
                         try {
                             if (handler.isExpired(ServerUpdateCount)) {
@@ -86,22 +120,17 @@ public class AggregationServer {
                         } finally {
                             handler.rwLock.writeLock().unlock();
                         }
-
                     }
-                } catch (InterruptedException ignored) {
-                }
+                } catch (InterruptedException ignored) {}
             }
         }).start();
 
+        // Main loop
         while (true) {
             try {
                 System.out.println("... waiting for connection");
-                // start new thread on each client connection
-                // Initialise sockets and stream
-                Socket socket = serverSocket.accept(); // blocks this thread ?? till we receive a connection
-
+                Socket socket = serverSocket.accept();
                 System.out.printf("client / server from port %d connected\n", socket.getPort());
-
                 new Thread(new handleConnection(socket, files)).start();
             } catch (IOException | NullPointerException i) {
                 System.out.println(i.getMessage());
@@ -109,18 +138,27 @@ public class AggregationServer {
         }
     }
 
+    /**
+     * Entry point for starting the AggregationServer.
+     *
+     * @param args command-line arguments, expected format: {@code -p <port>}
+     */
     public static void main(String[] args) {
+        // check params
         if (args.length != 2 || !args[0].equals("-p")) {
             System.err.println("Usage: java AggregationServer -p <port>");
             System.exit(1);
         }
+
+        // get port
         String portStr = args[1];
         int port = UrlManager.validateAndGetPort(portStr);
         if (port == -1) {
             System.exit(1);
         }
-        AggregationServer aggregationServer = new AggregationServer(port);
 
+        // start server
+        AggregationServer aggregationServer = new AggregationServer(port);
         aggregationServer.run();
     }
 }
