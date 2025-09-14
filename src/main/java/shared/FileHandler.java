@@ -8,27 +8,50 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+/**
+ * The {@code FileHandler} is responsible for persisting and managing station data
+ * in JSON files on disk.
+ *
+ * <p>Features:</p>
+ * <ul>
+ *   <li>Atomic writes using a temporary file and that replaces the main file.</li>
+ *   <li>Stores metadata such as Lamport clock, last update time, global update count, and sender info.</li>
+ *   <li>Thread safety guaranteed using a {@link ReentrantReadWriteLock}.</li>
+ *   <li>Supports reading persisted files back into memory on server restart.</li>
+ *   <li>Expiration checks based on elapsed time or global update count differences.</li>
+ * </ul>
+ */
 public class FileHandler {
     private String serializedObj = null;
     private final String stationID;
     public final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
 
-    // meta data
+    // Metadata fields
     private int lamportClock;
-    private long lastUpdated;          // epoch millis
-    private int globalUpdateCount;     // total updates across system at time of writing
-    private String lastHost;           // host that sent the update
-    private int lastPort;              // port that sent the update
+    private long lastUpdated;          // Epoch millis
+    private int globalUpdateCount;     // Total updates across system at time of writing
+    private String lastHost;           // Host that sent the update
+    private int lastPort;              // Port that sent the update
 
-    private boolean safeWrite(int lamportClock, long lastUpdated, int globalUpdateCount, String lastHost, int lastPort, String serializedObj) {
+    /**
+     * Performs an atomic write of station data to disk using a temp file.
+     *
+     * @param lamportClock      the Lamport clock value
+     * @param lastUpdated       epoch time of the update
+     * @param globalUpdateCount global update count at the time of writing
+     * @param lastHost          host that submitted the update
+     * @param lastPort          port that submitted the update
+     * @param serializedObj     the serialized JSON body of the station entry
+     * @return {@code true} if write succeeded, {@code false} otherwise
+     */
+    private boolean safeWrite(int lamportClock, long lastUpdated,
+                              int globalUpdateCount, String lastHost,
+                              int lastPort, String serializedObj) {
         String tempFileName = stationID + "-temp.json";
         String mainFileName = stationID + ".json";
 
-        File tempFile = new File(tempFileName);
-        File mainFile = new File(mainFileName);
-
         try (BufferedWriter writer = new BufferedWriter(new FileWriter(tempFileName))) {
-            // Build JSON object
+            // Build JSON structure with meta + body
             writer.write("{");
             writer.newLine();
 
@@ -71,15 +94,35 @@ public class FileHandler {
         return true;
     }
 
+    /**
+     * Constructs a new FileHandler for the given station ID.
+     *
+     * @param stationID the unique station identifier
+     */
     public FileHandler(String stationID) {
         this.stationID = stationID;
         this.lamportClock = 0;
     }
 
-    public void writeToFile(String serializedObj, int lamportClock, long lastUpdated, int globalUpdateCount, String lastHost, int lastPort) {
+    /**
+     * Writes a new update to the station file if the Lamport clock is newer.
+     *
+     * <p>This method acquires a write lock and performs an atomic disk write.
+     * Metadata and serialized body are updated in memory after a successful write.</p>
+     *
+     * @param serializedObj     serialized JSON body of the station entry
+     * @param lamportClock      Lamport clock of the incoming update
+     * @param lastUpdated       epoch millis of the update
+     * @param globalUpdateCount global update count at the time of writing
+     * @param lastHost          host that submitted the update
+     * @param lastPort          port that submitted the update
+     */
+    public void writeToFile(String serializedObj, int lamportClock, long lastUpdated,
+                            int globalUpdateCount, String lastHost, int lastPort) {
         rwLock.writeLock().lock();
         try {
             if (this.lamportClock < lamportClock) {
+                // if write was successful
                 if (!safeWrite(lamportClock, lastUpdated, globalUpdateCount, lastHost, lastPort, serializedObj)) {
                     return;
                 }
@@ -95,6 +138,11 @@ public class FileHandler {
         }
     }
 
+    /**
+     * Returns the serialized body of the station entry.
+     *
+     * @return JSON string body
+     */
     public String getSerializedObj() {
         rwLock.readLock().lock();
         try {
@@ -104,17 +152,18 @@ public class FileHandler {
         }
     }
 
+    /**
+     * Reads a persisted JSON file from disk and loads its metadata and body into memory.
+     *
+     * @param stationID the station identifier
+     */
     public void readFromFile(String stationID) {
-
         String fileName = stationID + ".json";
 
         try (FileReader reader = new FileReader(fileName)) {
             Gson gson = new Gson();
-
-            // Parse file into a JsonObject
             JsonObject json = gson.fromJson(reader, JsonObject.class);
 
-            // Extract metadata
             JsonObject meta = json.getAsJsonObject("meta");
             this.lamportClock = meta.get("lamport").getAsInt();
             this.lastUpdated = meta.get("lastUpdated").getAsLong();
@@ -122,15 +171,13 @@ public class FileHandler {
             this.lastHost = meta.get("host").getAsString();
             this.lastPort = meta.get("port").getAsInt();
 
-            // Extract body (as JSON string)
-            String body = json.get("body").toString();
-            this.serializedObj = body;
-
+            this.serializedObj = json.get("body").toString();
         } catch (IOException | JsonSyntaxException e) {
             System.err.println("Failed to read file: " + e.getMessage());
         }
     }
 
+    /** @return the Lamport clock value stored for this station */
     public int getLamportClock() {
         rwLock.readLock().lock();
         try {
@@ -140,6 +187,7 @@ public class FileHandler {
         }
     }
 
+    /** @return the last update timestamp in epoch millis */
     public long getLastUpdated() {
         rwLock.readLock().lock();
         try {
@@ -149,6 +197,7 @@ public class FileHandler {
         }
     }
 
+    /** @return the global update count when this entry was last written */
     public int getGlobalUpdateCount() {
         rwLock.readLock().lock();
         try {
@@ -158,6 +207,7 @@ public class FileHandler {
         }
     }
 
+    /** @return the host that submitted the last update */
     public String getLastHost() {
         rwLock.readLock().lock();
         try {
@@ -167,6 +217,7 @@ public class FileHandler {
         }
     }
 
+    /** @return the port that submitted the last update */
     public int getLastPort() {
         rwLock.readLock().lock();
         try {
@@ -176,6 +227,18 @@ public class FileHandler {
         }
     }
 
+    /**
+     * Determines whether this file is expired.
+     *
+     * <p>A file is considered expired if:</p>
+     * <ul>
+     *   <li>Its age exceeds 30 seconds, OR</li>
+     *   <li>The difference between the current global update count and the file’s update count is greater than 20.</li>
+     * </ul>
+     *
+     * @param currentGlobalUpdateCount the latest known global update count
+     * @return {@code true} if expired, {@code false} otherwise
+     */
     public boolean isExpired(int currentGlobalUpdateCount) {
         rwLock.readLock().lock();
         try {
@@ -187,6 +250,9 @@ public class FileHandler {
         }
     }
 
+    /**
+     * Deletes the station’s main JSON file from disk if it exists.
+     */
     public void deleteFileFromDisk() {
         try {
             Path mainFile = Paths.get(stationID + ".json");
