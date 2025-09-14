@@ -1,5 +1,9 @@
 package GETclient;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 import shared.*;
 
 import java.net.*;
@@ -146,10 +150,19 @@ public class GETClient {
             lamportClock = Math.max(lamportClock, Integer.parseInt(serverLamport)) + 1;
             System.out.printf("Synced successfully, new lamport clock: %d\n", lamportClock);
 
-            //TODO: Pretty print response for debugging
+            //Pretty print response for debugging
+            Gson gson = new GsonBuilder().setPrettyPrinting().create();
+
             System.out.println("Parsed Response Status: " + httpResponse.statusCode + " " + httpResponse.statusMessage);
-            System.out.println("Headers: " + httpResponse.headers);
-            System.out.println("Body: " + httpResponse.body);
+            System.out.println("Headers: " + gson.toJson(httpResponse.headers));
+
+            // parse body into json element
+            JsonElement jsonElement = JsonParser.parseString(httpResponse.body);
+
+            // Convert back to a pretty-printed string
+            String prettyBody = gson.toJson(jsonElement);
+
+            System.out.println("Body: " + prettyBody);
 
             return response;
         }, 5,1000);
