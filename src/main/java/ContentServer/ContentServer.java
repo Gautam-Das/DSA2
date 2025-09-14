@@ -1,6 +1,7 @@
 package ContentServer;
 
 import shared.HTTPParser;
+import shared.HTTPResponse;
 import shared.IpPort;
 import shared.UrlManager;
 
@@ -18,6 +19,55 @@ public class ContentServer {
         this.aggServerIP = aggServerIP;
         this.aggServerPort = aggServerPort;
         this.filename = filename;
+    }
+
+    private Socket socket;
+    private DataOutputStream outputStream;
+    private DataInputStream inputStream;
+
+    public void connectToServer() throws IOException {
+        socket = new Socket(aggServerIP, aggServerPort);
+        outputStream = new DataOutputStream(socket.getOutputStream());
+        inputStream = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+        System.out.printf("Connected to AggregationServer at %s:%d\n", aggServerIP, aggServerPort);
+    }
+
+    public void closeConnection() {
+        try {
+            if (outputStream != null) outputStream.close();
+            if (inputStream != null) inputStream.close();
+            if (socket != null) socket.close();
+        } catch (IOException e) {
+            System.err.println("Error closing connection: " + e.getMessage());
+        }
+    }
+
+    public void syncWithServer() throws IOException {
+        HTTPParser parser = new HTTPParser();
+        HashMap<String, String> headers = new HashMap<>();
+        lamportClock++;
+        headers.put("Lamport-Clock", String.valueOf(lamportClock));
+
+        // SYNC request
+        String request = parser.createHTTPRequest("SYNC", "/", null, headers);
+        System.out.println("Sending Lamport SYNC request:");
+        System.out.println(request);
+
+        outputStream.writeUTF(request);
+
+        String response = inputStream.readUTF();
+        System.out.println("SYNC response: " + response);
+        HTTPResponse httpResponse = parser.parseHttpResponse(response);
+        if (httpResponse == null) {
+            System.err.println("Invalid response received");
+            return;
+        }
+
+        //TODO:RETRY LOGIC ON BAD STATUS OR MISSING LAMPORT CLOCK
+        try {
+            lamportClock = Math.max(lamportClock, Integer.parseInt(httpResponse.headers.get("Lamport-Clock"))) + 1;
+            System.out.printf("Synced successfully, new lamport clock: %d \n", lamportClock);
+        } catch (Exception ignore) {}
     }
 
     public void run() {
@@ -61,12 +111,7 @@ public class ContentServer {
         // Increment Lamport clock before sending
         lamportClock++;
 
-        try (
-                Socket socket = new Socket(aggServerIP, aggServerPort);
-                DataOutputStream outputStream = new DataOutputStream(socket.getOutputStream());
-                DataInputStream inputStream = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-             ) {
-
+        try {
             HTTPParser parser = new HTTPParser();
             HashMap<String, String> headers = new HashMap<>();
             headers.put("Lamport-Clock", String.valueOf(lamportClock));
@@ -83,12 +128,11 @@ public class ContentServer {
             String response = inputStream.readUTF();
 
             System.out.println(response);
-            // Basic acknowledgment check
-            if (response.toString().contains("201") || response.toString().contains("200")) {
-                System.out.println("Entry sent successfully: " + entry.get("id"));
-            } else {
-                System.err.println("Failed to send entry " + entry.get("id") + ": " + response);
-            }
+
+            HTTPResponse httpResponse = parser.parseHttpResponse(response);
+
+            //TODO: HANDLE RETRIES
+            //TODO: UPDATE LAMPORT CLOCK
 
         } catch (IOException e) {
             System.err.println("Error sending entry: " + e.getMessage());
@@ -112,6 +156,13 @@ public class ContentServer {
 
         // Create and run ContentServer.ContentServer instance
         ContentServer server = new ContentServer(ipPort.ip, ipPort.port, filename);
-        server.run();
+        try {
+            server.connectToServer();
+            server.syncWithServer();
+            server.run();
+            server.closeConnection();
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
     }
 }

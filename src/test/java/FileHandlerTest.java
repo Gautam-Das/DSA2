@@ -30,7 +30,7 @@ class FileHandlerTest {
     @Test
     void testWriteToFile_WritesSuccessfully() throws IOException {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"msg\":\"hello\"}", 5);
+        handler.writeToFile("{\"msg\":\"hello\"}", 5, 0,0,"",0);
 
         assertTrue(Files.exists(MAIN_FILE), "Main file should exist after write");
 
@@ -43,8 +43,8 @@ class FileHandlerTest {
     @Test
     void testWriteToFile_NewerLamport_WritesSuccessfully() throws IOException {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"msg\":\"hello\"}", 5);
-        handler.writeToFile("{\"msg\":\"hello2\"}", 10);
+        handler.writeToFile("{\"msg\":\"hello\"}", 5, 0,0,"",0);
+        handler.writeToFile("{\"msg\":\"hello2\"}", 10, 0,0,"",0);
 
         // Read back contents
         String content = Files.readString(MAIN_FILE);
@@ -55,10 +55,10 @@ class FileHandlerTest {
     @Test
     void testWriteToFile_OlderLamportValue_Ignored() throws IOException {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"msg\":\"new\"}", 10);
+        handler.writeToFile("{\"msg\":\"new\"}", 10, 0,0,"",0);
 
         // Attempt with older lamport
-        handler.writeToFile("{\"msg\":\"old\"}", 5);
+        handler.writeToFile("{\"msg\":\"old\"}", 5, 0,0,"",0);
 
         String content = Files.readString(MAIN_FILE);
         assertTrue(content.contains("\"msg\":\"new\""), "Older lamport should not overwrite");
@@ -68,10 +68,10 @@ class FileHandlerTest {
     @Test
     void testWriteToFile_SameLamportValue_Ignored() throws IOException {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"msg\":\"new\"}", 10);
+        handler.writeToFile("{\"msg\":\"new\"}", 10, 0,0,"",0);
 
         // Attempt with same lamport
-        handler.writeToFile("{\"msg\":\"old\"}", 10);
+        handler.writeToFile("{\"msg\":\"old\"}", 10, 0,0,"",0);
 
         String content = Files.readString(MAIN_FILE);
         assertTrue(content.contains("\"msg\":\"new\""), "Same lamport should not overwrite");
@@ -81,11 +81,11 @@ class FileHandlerTest {
     @Test
     void testSafeWrite_FileMoveFailure_ShowsError() {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"msg\":\"hello\"}", 1);
+        handler.writeToFile("{\"msg\":\"hello\"}", 1, 0,0,"",0);
 
         // Lock main file to simulate failure in replace
         try (FileChannel ignored = FileChannel.open(MAIN_FILE, StandardOpenOption.WRITE)) {
-            handler.writeToFile("{\"msg\":\"world\"}", 2);
+            handler.writeToFile("{\"msg\":\"world\"}", 2, 0,0,"",0);
         } catch (IOException e) {
             // some OSs may not allow locking like this; fallback is to check stderr manually
         }
@@ -97,7 +97,7 @@ class FileHandlerTest {
     @Test
     void testReadFromFile_ValidFile_UpdatesState() {
         FileHandler writer = new FileHandler(TEST_STATION_ID);
-        writer.writeToFile("{\"data\":42}", 7);
+        writer.writeToFile("{\"data\":42}", 7, 0,0,"",0);
 
         FileHandler reader = new FileHandler(TEST_STATION_ID);
         reader.readFromFile(TEST_STATION_ID);
@@ -125,15 +125,15 @@ class FileHandlerTest {
     @Test
     void testGetSerializedObj_ReturnsLatest() {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"abc\":123}", 3);
+        handler.writeToFile("{\"abc\":123}", 3, 0,0,"",0);
         assertEquals("{\"abc\":123}", handler.getSerializedObj());
     }
 
     @Test
     void testGetSerializedObj_GreaterLamport_ReturnsLatest() {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"abc\":123}", 3);
-        handler.writeToFile("{\"msg\":\"hello\"}", 5);
+        handler.writeToFile("{\"abc\":123}", 3, 0,0,"",0);
+        handler.writeToFile("{\"msg\":\"hello\"}", 5, 0,0,"",0);
 
         assertEquals("{\"msg\":\"hello\"}", handler.getSerializedObj());
     }
@@ -141,8 +141,8 @@ class FileHandlerTest {
     @Test
     void testGetSerializedObj_LowerLamport_ReturnsLatest() {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"abc\":123}", 3);
-        handler.writeToFile("{\"msg\":\"hello\"}", 1);
+        handler.writeToFile("{\"abc\":123}", 3, 0,0,"",0);
+        handler.writeToFile("{\"msg\":\"hello\"}", 1, 0,0,"",0);
 
         assertEquals("{\"abc\":123}", handler.getSerializedObj());
     }
@@ -150,8 +150,8 @@ class FileHandlerTest {
     @Test
     void testGetSerializedObj_SameLamport_ReturnsLatest() {
         FileHandler handler = new FileHandler(TEST_STATION_ID);
-        handler.writeToFile("{\"abc\":123}", 3);
-        handler.writeToFile("{\"msg\":\"hello\"}", 3);
+        handler.writeToFile("{\"abc\":123}", 3, 0,0,"",0);
+        handler.writeToFile("{\"msg\":\"hello\"}", 3, 0,0,"",0);
 
         assertEquals("{\"abc\":123}", handler.getSerializedObj());
     }
@@ -191,8 +191,8 @@ class FileHandlerTest {
     @Test
     void testCrash_BothTempAndMainExist_MainPreferred() throws IOException {
         // Simulate crash after writing temp but before cleaning it up
-        String mainContent = "{ \"lamport\": 50, \"body\": {\"msg\":\"main-ok\"}}";
-        String tempContent = "{ \"lamport\": 200, \"body\": {\"msg\":\"temp-stale\"}}";
+        String mainContent = "{ \"meta\": {\"lamport\": 50, \"lastUpdated\": 0, \"updateCount\": 0, \"host\":\"127.0.0.1\", \"port\":10 }, \"body\": {\"msg\":\"main-ok\"}}";
+        String tempContent = "{ \"meta\": {\"lamport\": 200, \"lastUpdated\": 0, \"updateCount\": 0, \"host\":\"127.0.0.1\", \"port\":10 }, \"body\": {\"msg\":\"temp-stale\"}}";
 
         Files.writeString(MAIN_FILE, mainContent);
         Files.writeString(TEMP_FILE, tempContent);
@@ -265,7 +265,7 @@ class FileHandlerTest {
                         startLatch.await();
                         // write 20 times with different lamport values
                         for (int j = 0; j < 20; j++) {
-                            handler.writeToFile("{\"msg\":\"writer-" + i + "-round-" + j + "\"}", j + i * 100);
+                            handler.writeToFile("{\"msg\":\"writer-" + i + "-round-" + j + "\"}", j + i * 100, 0,0,"",0);
                         }
                     } catch (Exception ignored) {
                         // ignore exception
@@ -301,7 +301,7 @@ class FileHandlerTest {
         IntStream.range(1,51).forEach(
                 i -> executor.submit(() -> {
                     try {
-                        handler.writeToFile("{\"msg\":\"val-" + i + "\"}", i);
+                        handler.writeToFile("{\"msg\":\"val-" + i + "\"}", i, 0,0,"",0);
                     } catch (Exception ignored) {
                         // ignore exception
                     }
@@ -315,4 +315,78 @@ class FileHandlerTest {
         assertEquals(50, handler.getLamportClock());
         assertEquals("{\"msg\":\"val-50\"}", handler.getSerializedObj());
     }
+
+    @Test
+    void testWriteToFile_MetadataWrittenCorrectly() throws IOException {
+        FileHandler handler = new FileHandler(TEST_STATION_ID);
+
+        handler.writeToFile("{\"msg\":\"hello\"}", 5, 123456, 42,"127.0.0.1", 8080);
+
+        assertTrue(Files.exists(MAIN_FILE), "Main file should exist after write");
+
+        // Read back from file
+        String content = Files.readString(MAIN_FILE);
+        assertTrue(content.contains("\"lamport\": 5"));
+        assertTrue(content.contains("\"updateCount\": 42"));
+        assertTrue(content.contains("\"lastUpdated\": 123456"));
+        assertTrue(content.contains("\"host\": \"127.0.0.1\""));
+        assertTrue(content.contains("\"port\": 8080"));
+    }
+
+    @Test
+    void testReadFromFile_MetadataRestored() throws IOException {
+        // Write JSON manually with metadata
+        String json = "{\n" +
+                "  \"meta\": {\n" +
+                "    \"lamport\": 10,\n" +
+                "    \"lastUpdated\": 123456,\n" +
+                "    \"updateCount\": 10,\n" +
+                "    \"host\": \"127.0.0.1\",\n" +
+                "    \"port\": 1234\n" +
+                "  },\n" +
+                "  \"body\": {\"msg\":\"hi\"}\n" +
+                "}";
+        Files.writeString(MAIN_FILE, json);
+
+        FileHandler handler = new FileHandler(TEST_STATION_ID);
+        handler.readFromFile(TEST_STATION_ID);
+
+        assertEquals(10, handler.getLamportClock());
+        assertEquals(123456, handler.getLastUpdated());
+        assertEquals(10, handler.getGlobalUpdateCount());
+        assertEquals("127.0.0.1", handler.getLastHost());
+        assertEquals(1234, handler.getLastPort());
+        assertTrue(handler.getSerializedObj().contains("\"msg\":\"hi\""));
+    }
+
+    @Test
+    void testWriteToFile_OverwritesMetadata() throws IOException {
+        FileHandler handler = new FileHandler(TEST_STATION_ID);
+
+        handler.writeToFile("{\"msg\":\"first\"}", 1, 1,1, "127.0.0.1", 1111);
+        handler.writeToFile("{\"msg\":\"second\"}", 2, 2,2, "127.0.0.2", 2222);
+
+        String content = Files.readString(MAIN_FILE);
+        assertTrue(content.contains("\"msg\":\"second\""));
+        assertTrue(content.contains("\"updateCount\": 2"));
+        assertTrue(content.contains("\"lastUpdated\": 2"));
+        assertTrue(content.contains("\"host\": \"127.0.0.2\""));
+        assertTrue(content.contains("\"port\": 2222"));
+    }
+
+    @Test
+    void testGettersThreadSafety() {
+        FileHandler handler = new FileHandler(TEST_STATION_ID);
+        handler.writeToFile("{\"msg\":\"safe\"}", 3, 7,10, "localhost", 9999);
+
+        // Call getters under multiple threads
+        IntStream.range(0, 20).parallel().forEach(i -> {
+            assertNotNull(handler.getSerializedObj());
+            assertTrue(handler.getLamportClock() >= 0);
+            assertTrue(handler.getGlobalUpdateCount() >= 0);
+            assertNotNull(handler.getLastHost());
+            assertTrue(handler.getLastPort() > 0);
+        });
+    }
 }
+

@@ -11,6 +11,7 @@ import shared.UrlManager;
 import java.net.*;
 import java.io.*;
 import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class AggregationServer {
@@ -18,6 +19,7 @@ public class AggregationServer {
     private ServerSocket serverSocket;
     private ConcurrentHashMap<String, FileHandler> files = new ConcurrentHashMap<>();
     public static int ServerLamportClock = 0;
+    public static int ServerUpdateCount = 0;
     // Constructor with Port
     public AggregationServer(int port) {
         try {
@@ -30,6 +32,30 @@ public class AggregationServer {
     }
 
     public void run() {
+        // garbage collection thread to delete files
+        new Thread(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(120_000); // every 2 minutes
+                    for (ConcurrentHashMap.Entry<String, FileHandler> entry : files.entrySet()){
+                        String id = entry.getKey();
+                        FileHandler handler = entry.getValue();
+                        handler.rwLock.writeLock().lock();
+                        try {
+                            if (handler.isExpired(ServerUpdateCount)) {
+                                handler.deleteFileFromDisk();
+                                files.remove(id, handler);
+                                System.out.println("Deleted expired file: " + id);
+                            }
+                        } finally {
+                            handler.rwLock.writeLock().unlock();
+                        }
+
+                    }
+                } catch (InterruptedException ignored) {}
+            }
+        }).start();
+
         while (true) {
             try {
                 System.out.println("... waiting for connection");
@@ -75,57 +101,61 @@ class handleConnection implements Runnable {
     }
     private static final Object clockLock = new Object();
 
-
     @Override
     public void run() {
-        try {
-            DataInputStream inputStream = new DataInputStream(
-                    new BufferedInputStream(socket.getInputStream())
-            );
-            DataOutputStream outputStream = new DataOutputStream(socket.getOutputStream());
-//            System.out.println("why isn't it responding");
-
-            // get message from connection
-            message = inputStream.readUTF();
-            System.out.println(message);
+        try (
+                DataInputStream inputStream = new DataInputStream(
+                        new BufferedInputStream(socket.getInputStream())
+                );
+                DataOutputStream outputStream = new DataOutputStream(socket.getOutputStream())
+        ) {
             HTTPParser parser = new HTTPParser();
-            HTTPRequest request = parser.parseHttpRequest(message);
 
-//            System.out.println("request parsed successfully");
-
-            String response = null;
-
-            if (request == null) {
-                System.err.println("Parsing failed on message");
-            } else if (request.method.equals("GET")) {
-                response = handleGETRequest(request);
-            } else if (request.method.equals("PUT")) {
-                response = handlePUTRequest(request);
-            } else {
-                System.err.println("Invalid HTTP request, must be either a GET or PUT request");
-            }
-
-            if (response == null) {
-                HashMap<String, String> headers = new HashMap<>();
-                synchronized (clockLock) {
-                    AggregationServer.ServerLamportClock = AggregationServer.ServerLamportClock + 1;
-                    headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
+            while (true) {
+                String message;
+                try {
+                    // blocks until client sends another message or disconnects
+                    message = inputStream.readUTF();
+                } catch (EOFException eof) {
+                    System.out.printf("Client %d closed connection\n", socket.getPort());
+                    break; // exit loop and close socket
                 }
-                HTTPParser httpParser = new HTTPParser();
-                response = httpParser.createHTTPResponse(400, "Bad Request", null, headers);
+
+                System.out.println("Received message:\n" + message);
+                HTTPRequest request = parser.parseHttpRequest(message);
+
+                String response = null;
+                if (request == null) {
+                    System.err.println("Parsing failed on message");
+                } else if ("GET".equals(request.method)) {
+                    response = handleGETRequest(request);
+                } else if ("PUT".equals(request.method)) {
+                    response = handlePUTRequest(request);
+                } else if ("SYNC".equals(request.method)) {
+                    response = handleSYNCRequest(request);
+                } else {
+                    System.err.println("Invalid HTTP method: " + request.method);
+                }
+
+                if (response == null) {
+                    HashMap<String, String> headers = new HashMap<>();
+                    synchronized (clockLock) {
+                        AggregationServer.ServerLamportClock++;
+                        headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
+                    }
+                    response = parser.createHTTPResponse(400, "Bad Request", null, headers);
+                }
+
+                System.out.printf("Sending response to socket %d:\n%s\n", socket.getPort(), response);
+                outputStream.writeUTF(response);
+                outputStream.flush();
             }
-
-            System.out.printf("sending Response to socket %d:\n", socket.getPort());
-            System.out.println(response);
-            outputStream.writeUTF(response);
-
-            // Close connection
-            System.out.println("Closing connection");
-            socket.close();
-            inputStream.close();
         } catch (IOException i) {
-            System.err.println("Error while creating response");
-            System.err.println(i.getMessage());
+            System.err.println("Error while handling connection: " + i.getMessage());
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException ignored) {}
         }
     }
 
@@ -199,6 +229,7 @@ class handleConnection implements Runnable {
 
             int count = 0;
             for (FileHandler handler : files.values()) {
+                if (handler.isExpired(AggregationServer.ServerUpdateCount)) continue;
                 if (count > 0) {
                     bodyBuilder.append(",");
                 }
@@ -213,7 +244,7 @@ class handleConnection implements Runnable {
         } else {
             // return the one match id else bad request
             FileHandler fileHandler = files.get(getValidationResult.id);
-            if (fileHandler == null) {
+            if (fileHandler == null || fileHandler.isExpired(AggregationServer.ServerUpdateCount)) {
                 return httpParser.createHTTPResponse(400, "Bad Request", null, headers);
             } else {
                 return httpParser.createHTTPResponse(200, "OK", fileHandler.getSerializedObj(), headers);
@@ -281,17 +312,19 @@ class handleConnection implements Runnable {
         return result;
     }
 
-
     private String handlePUTRequest(HTTPRequest request) {
         // Get lamport clock
         HTTPParser httpParser = new HTTPParser();
         HashMap<String, String> headers = new HashMap<>();
-
+        int curServerUpdateVal;
         PUTValidationResult putValidationResult = validatePUTRequest(request);
 
         // update server lamport clock value
         synchronized (clockLock) {
             AggregationServer.ServerLamportClock = Math.max(AggregationServer.ServerLamportClock, putValidationResult.requestLamportClock) + 1;
+            AggregationServer.ServerUpdateCount++;
+            curServerUpdateVal = AggregationServer.ServerUpdateCount;
+
             headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
         }
 
@@ -313,8 +346,22 @@ class handleConnection implements Runnable {
         System.out.println("SAVING TO FILE:");
         System.out.println(putValidationResult.body);
 
-        handler.writeToFile(putValidationResult.body, putValidationResult.requestLamportClock);
+        handler.writeToFile(putValidationResult.body, putValidationResult.requestLamportClock,
+                System.currentTimeMillis(), curServerUpdateVal,
+                socket.getInetAddress().getHostAddress(), socket.getPort());
 
         return httpParser.createHTTPResponse(putValidationResult.status, putValidationResult.message, null, headers);
+    }
+
+    private String handleSYNCRequest(HTTPRequest request) {
+        HTTPParser httpParser = new HTTPParser();
+        HashMap<String, String> headers = new HashMap<>();
+
+        synchronized (clockLock) {
+            AggregationServer.ServerLamportClock++;
+            headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
+        }
+
+        return httpParser.createHTTPResponse(200, "OK", null, headers);
     }
 }

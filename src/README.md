@@ -7,3 +7,9 @@ stuff that still needs to be done:
 - don't close connection after responding to both client (??) and content
 - write your own json parser
 - clean code with linting
+  - comments
+  - doc strings
+- logging
+
+- spin up multiple servers
+- 

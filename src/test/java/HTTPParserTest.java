@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import org.junit.jupiter.api.Test;
 import shared.HTTPParser;
 import shared.HTTPRequest;
+import shared.HTTPResponse;
 
 import java.util.HashMap;
 
@@ -74,7 +75,7 @@ class HTTPParserTest {
         String response = parser.createHTTPResponse(
                 200,
                 "OK",
-                item,
+                json,
                 new HashMap<>()
         );
 
@@ -97,7 +98,7 @@ class HTTPParserTest {
         String response = parser.createHTTPResponse(
                 201,
                 "Created",
-                item,
+                json,
                 new HashMap<>() {{
                     put("Location", "/api/items/456");
                 }}
@@ -125,7 +126,7 @@ class HTTPParserTest {
         String response = parser.createHTTPResponse(
                 400,
                 "Bad Request",
-                error,
+                json,
                 new HashMap<>()
         );
 
@@ -150,7 +151,7 @@ class HTTPParserTest {
         String response = parser.createHTTPResponse(
                 500,
                 "Internal Server Error",
-                error,
+                json,
                 new HashMap<>()
         );
 
@@ -281,5 +282,89 @@ class HTTPParserTest {
     void parseHttpRequest_nullOrEmpty_returnsNull() {
         assertNull(parser.parseHttpRequest(null));
         assertNull(parser.parseHttpRequest(""));
+    }
+
+    @Test
+    void parseHttpResponse_valid200Response() {
+        String response =
+                "HTTP/1.1 200 OK\r\n" +
+                        "User-Agent: ATOMClient/1/0\r\n" +
+                        "Content-Type: application/json\r\n" +
+                        "Content-Length: 17\r\n" +
+                        "\r\n" +
+                        "{\"msg\":\"success\"}";
+
+        HTTPResponse parsed = parser.parseHttpResponse(response);
+
+        assertNotNull(parsed);
+        assertEquals("HTTP/1.1", parsed.httpVersion);
+        assertEquals(200, parsed.statusCode);
+        assertEquals("OK", parsed.statusMessage);
+        assertEquals("ATOMClient/1/0", parsed.headers.get("User-Agent"));
+        assertEquals("application/json", parsed.headers.get("Content-Type"));
+        assertEquals("{\"msg\":\"success\"}", parsed.body);
+    }
+
+    @Test
+    void parseHttpResponse_valid201Created() {
+        String response =
+                "HTTP/1.1 201 Created\r\n" +
+                        "User-Agent: ATOMClient/1/0\r\n" +
+                        "Location: /api/items/456\r\n" +
+                        "\r\n" +
+                        "{\"id\":456}";
+
+        HTTPResponse parsed = parser.parseHttpResponse(response);
+
+        assertNotNull(parsed);
+        assertEquals(201, parsed.statusCode);
+        assertEquals("Created", parsed.statusMessage);
+        assertEquals("/api/items/456", parsed.headers.get("Location"));
+        assertEquals("{\"id\":456}", parsed.body);
+    }
+
+    @Test
+    void parseHttpResponse_noBody() {
+        String response =
+                "HTTP/1.1 204 No Content\r\n" +
+                        "User-Agent: ATOMClient/1/0\r\n" +
+                        "\r\n";
+
+        HTTPResponse parsed = parser.parseHttpResponse(response);
+
+        assertNotNull(parsed);
+        assertEquals(204, parsed.statusCode);
+        assertEquals("No Content", parsed.statusMessage);
+        assertEquals("", parsed.body);
+    }
+
+    @Test
+    void parseHttpResponse_invalidStatusCode_returnsNull() {
+        String response =
+                "HTTP/1.1 NOT_A_NUMBER OK\r\n" +
+                        "User-Agent: ATOMClient/1/0\r\n" +
+                        "\r\n";
+
+        HTTPResponse parsed = parser.parseHttpResponse(response);
+
+        assertNull(parsed);
+    }
+
+    @Test
+    void parseHttpResponse_withExtraSpaces() {
+        String response =
+                "HTTP/1.1   500   Internal Server Error\r\n" +
+                        "User-Agent: ATOMClient/1/0\r\n" +
+                        "Content-Type: text/plain\r\n" +
+                        "\r\n" +
+                        "fail";
+
+        HTTPResponse parsed = parser.parseHttpResponse(response);
+
+        assertNotNull(parsed);
+        assertEquals(500, parsed.statusCode);
+        assertEquals("Internal Server Error", parsed.statusMessage);
+        assertEquals("text/plain", parsed.headers.get("Content-Type"));
+        assertEquals("fail", parsed.body);
     }
 }

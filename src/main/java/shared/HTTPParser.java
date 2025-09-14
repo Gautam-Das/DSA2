@@ -20,8 +20,8 @@ public class HTTPParser {
      * @return HTTP Request Message
      */
     public String createHTTPRequest(String method, String requestTarget, Object data, HashMap<String, String> headers){
-        if (method == null || (!method.equals("GET") && !method.equals("PUT"))) {
-            throw new IllegalArgumentException("Only GET and PUT methods are supported.");
+        if (method == null || (!method.equals("GET") && !method.equals("PUT") && !method.equals("SYNC"))) {
+            throw new IllegalArgumentException("Only GET, PUT and SYNC methods are supported.");
         }
 
         boolean isPUT = method.equals("PUT");
@@ -33,7 +33,6 @@ public class HTTPParser {
 
         // Default headers
         request.append("User-Agent: ").append(USER_AGENT).append("\r\n");
-        // request.append("Host: localhost\r\n");
 
         // Custom headers
         if (headers != null) {
@@ -157,7 +156,7 @@ public class HTTPParser {
             if (headerParts.length != 2) {
                 return null;
             }
-            result.headers.put(headerParts[0], headerParts[1]);
+            result.headers.put(headerParts[0].trim(), headerParts[1].trim());
         }
 
         // Parse body
@@ -177,4 +176,78 @@ public class HTTPParser {
         return result;
     }
 
+    /**
+     * Parse an HTTP response string into its components: version, status code,
+     * reason phrase, headers, and body.
+     *
+     * <p>For example:</p>
+     *
+     * <pre>
+     * HTTP/1.1 200 OK
+     * User-Agent: ATOMClient/1/0
+     * Content-Type: application/json
+     *
+     * {"key":"value"}
+     * </pre>
+     *
+     * @param httpResponse the raw HTTP response string
+     * @return a HTTPResponse object, or null if parsing fails
+     */
+    public HTTPResponse parseHttpResponse(String httpResponse) {
+        if (httpResponse == null || httpResponse.isEmpty()) {
+            return null;
+        }
+
+        String[] lines = httpResponse.split("\\r?\\n");
+        if (lines.length == 0) {
+            return null;
+        }
+
+        HTTPResponse result = new HTTPResponse();
+
+        // Parse status line
+        // need to add limit 3, since status code can have spaces
+        String[] parts = lines[0].split("\\s+", 3);
+        if (parts.length < 3) {
+            return null;
+        }
+        result.httpVersion = parts[0];
+        try {
+            result.statusCode = Integer.parseInt(parts[1]);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+        result.statusMessage = parts[2];
+
+        // Parse headers
+        int i = 1;
+        for (; i < lines.length; i++) {
+            String line = lines[i];
+            if (line.trim().isEmpty()) {
+                i++; // next line onwards is body
+                break;
+            }
+            String[] headerParts = line.split(":", 2);
+            if (headerParts.length != 2) {
+                return null;
+            }
+            result.headers.put(headerParts[0].trim(), headerParts[1].trim());
+        }
+
+        // Parse body
+        if (i < lines.length) {
+            StringBuilder bodyBuilder = new StringBuilder();
+            for (; i < lines.length; i++) {
+                bodyBuilder.append(lines[i]);
+                if (i < lines.length - 1) {
+                    bodyBuilder.append("\n");
+                }
+            }
+            result.body = bodyBuilder.toString();
+        } else {
+            result.body = "";
+        }
+
+        return result;
+    }
 }
