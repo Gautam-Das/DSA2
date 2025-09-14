@@ -3,16 +3,18 @@ package AggregationServer;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
+import java.io.*;
+import java.net.*;
+import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import shared.FileHandler;
 import shared.HTTPParser;
 import shared.HTTPRequest;
 import shared.UrlManager;
 
-import java.net.*;
-import java.io.*;
-import java.util.HashMap;
-import java.util.concurrent.ConcurrentHashMap;
-
+/**
+ *
+ */
 public class AggregationServer {
 
     private ServerSocket serverSocket;
@@ -21,6 +23,7 @@ public class AggregationServer {
     public static int ServerUpdateCount = 0;
 
     // Constructor with Port
+
     public AggregationServer(int port) {
         try {
             serverSocket = new ServerSocket(port);
@@ -99,7 +102,6 @@ public class AggregationServer {
 
                 System.out.printf("client / server from port %d connected\n", socket.getPort());
 
-                //TODO: implement a client pool rather than just threads
                 new Thread(new handleConnection(socket, files)).start();
             } catch (IOException | NullPointerException i) {
                 System.out.println(i.getMessage());
