@@ -163,20 +163,50 @@ public class AggregationServer {
     }
 }
 
+/**
+ * The {@code handleConnection} class manages a client connection to the
+ * {@link AggregationServer}. Each instance runs in its own thread and is responsible for
+ * parsing requests, updating Lamport clocks, and returning appropriate responses.
+ *
+ * <p>Responsibilities:</p>
+ * <ul>
+ *   <li>Parses and validates HTTP-like requests (GET, PUT, SYNC).</li>
+ *   <li>Updates the global Lamport clock for each request.</li>
+ *   <li>Handles creation, update, and expiration of weather station files.</li>
+ *   <li>Cleans up resources when a ContentServer disconnects.</li>
+ * </ul>
+ */
 class handleConnection implements Runnable {
-    private Socket socket = null;
-    private String message = "";
+    private Socket socket;
     private ConcurrentHashMap<String, FileHandler> files;
     // used when content server connects to track which station id it is reporting for
     private String contentServerStationId;
 
+    private static final Object clockLock = new Object();
+
+    /**
+     * Constructs a new handler for a client connection.
+     *
+     * @param socket the client socket to handle
+     * @param files  a shared map of station IDs to {@link FileHandler} objects
+     */
     handleConnection(Socket socket, ConcurrentHashMap<String, FileHandler> files) {
         this.socket = socket;
         this.files = files;
     }
 
-    private static final Object clockLock = new Object();
-
+    /**
+     * Main execution loop for handling client requests.
+     *
+     * <p>Behavior:</p>
+     * <ul>
+     *   <li>Blocks while waiting for messages from the client.</li>
+     *   <li>Delegate requests to the appropriate handler method
+     *       ({@code handleGETRequest}, {@code handlePUTRequest}, {@code handleSYNCRequest}).</li>
+     *   <li>Handles malformed requests with a {@code 400 Bad Request} response.</li>
+     *   <li>Deletes data files if a ContentServer disconnects unexpectedly.</li>
+     * </ul>
+     */
     @Override
     public void run() {
         try (
@@ -192,29 +222,7 @@ class handleConnection implements Runnable {
                     // blocks until client sends another message or disconnects
                     message = inputStream.readUTF();
                 } catch (IOException eof) {
-
-                    if (contentServerStationId != null) {
-                        FileHandler handler = files.get(contentServerStationId);
-                        if (handler == null ||
-                                !socket.getInetAddress().getHostAddress().equals(handler.getLastHost()) ||
-                                handler.getLastPort() != socket.getPort()
-                        ) {
-                            break;
-                        }
-                        ;
-                        handler.rwLock.writeLock().lock();
-                        try {
-                            handler.deleteFileFromDisk();
-                            files.remove(contentServerStationId, handler);
-                            System.out.printf("Client %s:%d disconnected\n",
-                                    socket.getInetAddress().getHostAddress(),
-                                    socket.getPort());
-                            System.out.printf("deleted %s-json\n", contentServerStationId);
-                        } finally {
-                            handler.rwLock.writeLock().unlock();
-                        }
-
-                    }
+                    handleDisconnect();
                     break; // exit loop and close socket
                 }
 
@@ -252,11 +260,40 @@ class handleConnection implements Runnable {
         } finally {
             try {
                 socket.close();
-            } catch (IOException ignored) {
+            } catch (IOException ignored) {}
+        }
+    }
+
+    /**
+     * Handles cleanup logic when a ContentServer disconnects.
+     * If the disconnected client was responsible for a station ID,
+     * the associated file is deleted and removed from the in-memory map.
+     */
+    private void handleDisconnect() {
+        if (contentServerStationId != null) {
+            FileHandler handler = files.get(contentServerStationId);
+            if (handler == null ||
+                    !socket.getInetAddress().getHostAddress().equals(handler.getLastHost()) ||
+                    handler.getLastPort() != socket.getPort()) {
+                return;
+            }
+            handler.rwLock.writeLock().lock();
+            try {
+                handler.deleteFileFromDisk();
+                files.remove(contentServerStationId, handler);
+                System.out.printf("Client %s:%d disconnected\n",
+                        socket.getInetAddress().getHostAddress(),
+                        socket.getPort());
+                System.out.printf("deleted %s.json\n", contentServerStationId);
+            } finally {
+                handler.rwLock.writeLock().unlock();
             }
         }
     }
 
+    /**
+     * Helper class for GET request validation results.
+     */
     private static class GETValidationResult {
         int status = 200;
         String message = "OK";
@@ -264,6 +301,13 @@ class handleConnection implements Runnable {
         int requestLamportClock = 0;
     }
 
+    /**
+     * Validates a GET request for proper URI and Lamport clock header.
+     *
+     * @param request the parsed {@link HTTPRequest} object
+     * @return a {@link GETValidationResult} containing validation status, ID (if any),
+     *         and request Lamport clock
+     */
     private GETValidationResult validateGETRequest(HTTPRequest request) {
         GETValidationResult result = new GETValidationResult();
 
@@ -284,26 +328,35 @@ class handleConnection implements Runnable {
             return result;
         }
 
-        // parse lamport clock to int
-        int requestLamportClock = 0;
         try {
-            requestLamportClock = Integer.parseInt(requestLamportClockString.trim());
+            result.requestLamportClock = Integer.parseInt(requestLamportClockString.trim());
         } catch (NumberFormatException e) {
             result.status = 400;
             result.message = "Bad Request";
             return result;
         }
 
-
         String id = request.uri.replace("/", "");
         if (!id.isEmpty()) {
-            result.id = id; // single resource
+            result.id = id; // single resource requested
         }
 
-        result.requestLamportClock = requestLamportClock;
         return result;
     }
 
+    /**
+     * Handles GET requests.
+     *
+     * <p>Behavior:</p>
+     * <ul>
+     *   <li>If URI = "/", returns a JSON array of all valid station files.</li>
+     *   <li>If URI = "/stationId", returns that station’s JSON or 400 if not found/expired.</li>
+     *   <li>Always updates the server Lamport clock.</li>
+     * </ul>
+     *
+     * @param request the parsed {@link HTTPRequest}
+     * @return a serialized HTTP-like response string
+     */
     private String handleGETRequest(HTTPRequest request) {
         HTTPParser httpParser = new HTTPParser();
         HashMap<String, String> headers = new HashMap<>();
@@ -312,7 +365,8 @@ class handleConnection implements Runnable {
 
         // update server lamport clock value
         synchronized (clockLock) {
-            AggregationServer.ServerLamportClock = Math.max(AggregationServer.ServerLamportClock, getValidationResult.requestLamportClock) + 1;
+            AggregationServer.ServerLamportClock =
+                    Math.max(AggregationServer.ServerLamportClock, getValidationResult.requestLamportClock) + 1;
             headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
         }
 
@@ -328,28 +382,25 @@ class handleConnection implements Runnable {
             int count = 0;
             for (FileHandler handler : files.values()) {
                 if (handler.isExpired(AggregationServer.ServerUpdateCount)) continue;
-                if (count > 0) {
-                    bodyBuilder.append(",");
-                }
+                if (count > 0) bodyBuilder.append(",");
                 count++;
                 bodyBuilder.append(handler.getSerializedObj());
             }
-
             bodyBuilder.append("]");
-
-            return httpParser.createHTTPResponse(getValidationResult.status, getValidationResult.message, bodyBuilder.toString(), headers);
-
+            return httpParser.createHTTPResponse(200, "OK", bodyBuilder.toString(), headers);
         } else {
-            // return the one match id else bad request
+            // return the one matching id else bad request
             FileHandler fileHandler = files.get(getValidationResult.id);
             if (fileHandler == null || fileHandler.isExpired(AggregationServer.ServerUpdateCount)) {
                 return httpParser.createHTTPResponse(400, "Bad Request", null, headers);
-            } else {
-                return httpParser.createHTTPResponse(200, "OK", fileHandler.getSerializedObj(), headers);
             }
+            return httpParser.createHTTPResponse(200, "OK", fileHandler.getSerializedObj(), headers);
         }
     }
 
+    /**
+     * Helper class for PUT request validation results.
+     */
     private static class PUTValidationResult {
         int status = 200;
         int requestLamportClock = 0;
@@ -358,6 +409,12 @@ class handleConnection implements Runnable {
         String body = null;
     }
 
+    /**
+     * Validates a PUT request for proper body and Lamport clock header.
+     *
+     * @param request the parsed {@link HTTPRequest}
+     * @return a {@link PUTValidationResult} containing validation status, ID, body, and clock
+     */
     private PUTValidationResult validatePUTRequest(HTTPRequest request) {
         PUTValidationResult result = new PUTValidationResult();
 
@@ -368,61 +425,64 @@ class handleConnection implements Runnable {
             return result;
         }
 
-        // parse lamport clock to int
-        int requestLamportClock = 0;
         try {
-            requestLamportClock = Integer.parseInt(requestLamportClockString.trim());
+            result.requestLamportClock = Integer.parseInt(requestLamportClockString.trim());
         } catch (NumberFormatException e) {
             result.status = 400;
             result.message = "Bad Request";
             return result;
         }
 
-        // parse body
         String body = request.body;
-
         if (body == null || !body.trim().startsWith("{")) {
             result.status = 204;
             result.message = "No Content";
             return result;
         }
 
-        Gson gson = new Gson();
-        JsonObject json = null;
         try {
-            json = gson.fromJson(body, JsonObject.class);
+            JsonObject json = new Gson().fromJson(body, JsonObject.class);
+            if (json == null || !json.has("id")) {
+                result.status = 400;
+                result.message = "Bad Request";
+                return result;
+            }
+            result.stationId = json.get("id").getAsString();
+            result.body = body;
         } catch (JsonSyntaxException e) {
             result.status = 500;
             result.message = "Internal Server Error";
-            return result;
         }
 
-        // GET id
-        if (json == null || !json.has("id")) {
-            result.status = 400;
-            result.message = "Bad Request";
-            return result;
-        }
-
-        result.stationId = json.get("id").getAsString();
-        result.requestLamportClock = requestLamportClock;
-        result.body = body;
         return result;
     }
 
+    /**
+     * Handles PUT requests.
+     *
+     * <p>Behavior:</p>
+     * <ul>
+     *   <li>Validates request body and Lamport clock.</li>
+     *   <li>Inserts new station (201 Created) or updates existing station (200 OK).</li>
+     *   <li>Persists the data into a JSON file via {@link FileHandler}.</li>
+     *   <li>Increments server Lamport clock and update counter.</li>
+     * </ul>
+     *
+     * @param request the parsed {@link HTTPRequest}
+     * @return a serialized HTTP-like response string
+     */
     private String handlePUTRequest(HTTPRequest request) {
-        // Get lamport clock
         HTTPParser httpParser = new HTTPParser();
         HashMap<String, String> headers = new HashMap<>();
         int curServerUpdateVal;
+
         PUTValidationResult putValidationResult = validatePUTRequest(request);
 
-        // update server lamport clock value
         synchronized (clockLock) {
-            AggregationServer.ServerLamportClock = Math.max(AggregationServer.ServerLamportClock, putValidationResult.requestLamportClock) + 1;
+            AggregationServer.ServerLamportClock =
+                    Math.max(AggregationServer.ServerLamportClock, putValidationResult.requestLamportClock) + 1;
             AggregationServer.ServerUpdateCount++;
             curServerUpdateVal = AggregationServer.ServerUpdateCount;
-
             headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
         }
 
@@ -434,16 +494,11 @@ class handleConnection implements Runnable {
         contentServerStationId = stationId;
         FileHandler handler = files.putIfAbsent(stationId, new FileHandler(stationId));
 
-        // handler is null if stationId doesn't already exist
         if (handler == null) {
-            // if newly created that status must be 201
             putValidationResult.status = 201;
             putValidationResult.message = "Created";
             handler = files.get(stationId);
         }
-
-        System.out.println("SAVING TO FILE:");
-        System.out.println(putValidationResult.body);
 
         handler.writeToFile(putValidationResult.body, putValidationResult.requestLamportClock,
                 System.currentTimeMillis(), curServerUpdateVal,
@@ -452,23 +507,37 @@ class handleConnection implements Runnable {
         return httpParser.createHTTPResponse(putValidationResult.status, putValidationResult.message, null, headers);
     }
 
+    /**
+     * Handles SYNC requests for Lamport clock synchronization.
+     *
+     * <p>Behavior:</p>
+     * <ul>
+     *   <li>Updates server Lamport clock to {@code max(server, client) + 1}.</li>
+     *   <li>Returns {@code 200 OK} with the new Lamport clock in headers.</li>
+     * </ul>
+     *
+     * @param request the parsed {@link HTTPRequest}
+     * @return a serialized HTTP-like response string
+     */
     private String handleSYNCRequest(HTTPRequest request) {
         HTTPParser httpParser = new HTTPParser();
         HashMap<String, String> headers = new HashMap<>();
 
         String requestLamportString = request.headers.get("Lamport-Clock");
         int requestLamportNumber = 0;
-        if (requestLamportString != null){
+        if (requestLamportString != null) {
             try {
-                requestLamportNumber = Integer.valueOf(requestLamportString);
+                requestLamportNumber = Integer.parseInt(requestLamportString);
             } catch (Exception ignored) {}
         }
 
         synchronized (clockLock) {
-            AggregationServer.ServerLamportClock = Math.max(AggregationServer.ServerLamportClock, requestLamportNumber) + 1;
+            AggregationServer.ServerLamportClock =
+                    Math.max(AggregationServer.ServerLamportClock, requestLamportNumber) + 1;
             headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
         }
 
         return httpParser.createHTTPResponse(200, "OK", null, headers);
     }
 }
+

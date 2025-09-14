@@ -7,6 +7,7 @@ import java.io.*;
 import java.net.Socket;
 import java.net.ServerSocket;
 import java.util.HashMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -41,7 +42,8 @@ class AggregationServerTest {
         HTTPParser parser = new HTTPParser();
         HashMap<String, String> headers = new HashMap<>();
         headers.put("Lamport-Clock", "1");
-
+        // simulate lack of data
+        server.files = new ConcurrentHashMap<>();
         String req = parser.createHTTPRequest("GET", "/", null, headers);
         Socket socket = new Socket("127.0.0.1", port);
         DataOutputStream out = new DataOutputStream(socket.getOutputStream());
