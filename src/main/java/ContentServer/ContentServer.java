@@ -1,9 +1,6 @@
 package ContentServer;
 
-import shared.HTTPParser;
-import shared.HTTPResponse;
-import shared.IpPort;
-import shared.UrlManager;
+import shared.*;
 
 import java.io.*;
 import java.net.Socket;
@@ -25,10 +22,13 @@ public class ContentServer {
     private DataOutputStream outputStream;
     private DataInputStream inputStream;
 
-    public void connectToServer() throws IOException {
-        socket = new Socket(aggServerIP, aggServerPort);
-        outputStream = new DataOutputStream(socket.getOutputStream());
-        inputStream = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+    public void connectToServer() throws Exception {
+        RetryUtils.withRetries(() -> {
+            socket = new Socket(aggServerIP, aggServerPort);
+            outputStream = new DataOutputStream(socket.getOutputStream());
+            inputStream = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+            return null;
+        }, 5, 1000);
         System.out.printf("Connected to AggregationServer at %s:%d\n", aggServerIP, aggServerPort);
     }
 
@@ -42,32 +42,31 @@ public class ContentServer {
         }
     }
 
-    public void syncWithServer() throws IOException {
+    public void syncWithServer() throws Exception {
         HTTPParser parser = new HTTPParser();
-        HashMap<String, String> headers = new HashMap<>();
-        lamportClock++;
-        headers.put("Lamport-Clock", String.valueOf(lamportClock));
 
-        // SYNC request
-        String request = parser.createHTTPRequest("SYNC", "/", null, headers);
-        System.out.println("Sending Lamport SYNC request:");
-        System.out.println(request);
+        RetryUtils.withRetries(() -> {
+            HashMap<String, String> headers = new HashMap<>();
+            lamportClock++;
+            headers.put("Lamport-Clock", String.valueOf(lamportClock));
 
-        outputStream.writeUTF(request);
+            String request = parser.createHTTPRequest("SYNC", "/", null, headers);
+            System.out.println("Sending Lamport SYNC request:");
+            outputStream.writeUTF(request);
+            String response = inputStream.readUTF();
 
-        String response = inputStream.readUTF();
-        System.out.println("SYNC response: " + response);
-        HTTPResponse httpResponse = parser.parseHttpResponse(response);
-        if (httpResponse == null) {
-            System.err.println("Invalid response received");
-            return;
-        }
+            HTTPResponse httpResponse = parser.parseHttpResponse(response);
+            if (httpResponse == null) throw new IOException("Invalid response");
+            if (httpResponse.statusCode == 500) throw new IOException("Server Error");
+            // Bad request
+            if (httpResponse.statusCode != 200) return null;
+            String serverLamport = httpResponse.headers.get("Lamport-Clock");
+            if (serverLamport == null) throw new IOException("Missing Lamport-Clock header");
 
-        //TODO:RETRY LOGIC ON BAD STATUS OR MISSING LAMPORT CLOCK
-        try {
-            lamportClock = Math.max(lamportClock, Integer.parseInt(httpResponse.headers.get("Lamport-Clock"))) + 1;
-            System.out.printf("Synced successfully, new lamport clock: %d \n", lamportClock);
-        } catch (Exception ignore) {}
+            lamportClock = Math.max(lamportClock, Integer.parseInt(serverLamport)) + 1;
+            System.out.printf("Synced successfully, new lamport clock: %d\n", lamportClock);
+            return null;
+        },5, 1000);
     }
 
     public void run() {
@@ -108,40 +107,54 @@ public class ContentServer {
             return;
         }
 
-        // Increment Lamport clock before sending
-        lamportClock++;
-
         try {
-            HTTPParser parser = new HTTPParser();
-            HashMap<String, String> headers = new HashMap<>();
-            headers.put("Lamport-Clock", String.valueOf(lamportClock));
+            RetryUtils.withRetries(() -> {
+                // Increment Lamport clock before sending
+                lamportClock++;
 
-            String request = parser.createHTTPRequest("PUT", "/weather.json", entry, headers);
+                HTTPParser parser = new HTTPParser();
+                HashMap<String, String> headers = new HashMap<>();
+                headers.put("Lamport-Clock", String.valueOf(lamportClock));
 
-            System.out.println("sending request:");
-            System.out.println(request);
+                String request = parser.createHTTPRequest("PUT", "/weather.json", entry, headers);
 
-            // Send request
-            outputStream.writeUTF(request);
+                System.out.println("Sending request:\n" + request);
 
-            // Read server response
-            String response = inputStream.readUTF();
+                // Send request
+                outputStream.writeUTF(request);
 
-            System.out.println(response);
+                // Read server response
+                String response = inputStream.readUTF();
+                System.out.println("Raw Response:\n" + response);
 
-            HTTPResponse httpResponse = parser.parseHttpResponse(response);
+                HTTPResponse httpResponse = parser.parseHttpResponse(response);
 
-            //TODO: HANDLE RETRIES
-            //TODO: UPDATE LAMPORT CLOCK
+                if (httpResponse == null) throw new IOException("Invalid response");
+                if (httpResponse.statusCode == 500) throw new IOException("Server Error");
 
-        } catch (IOException e) {
-            System.err.println("Error sending entry: " + e.getMessage());
+                // if not 200 or 201, must be 400 which is just bad request
+                if (httpResponse.statusCode != 200 && httpResponse.statusCode != 201) {
+                    return null;
+                }
+
+                String serverLamport = httpResponse.headers.get("Lamport-Clock");
+                if (serverLamport != null) {
+                    lamportClock = Math.max(lamportClock, Integer.parseInt(serverLamport)) + 1;
+                    System.out.printf("Lamport clock updated to %d\n", lamportClock);
+                }
+
+                System.out.println("Entry sent successfully: " + entry.get("id"));
+                return null;
+            }, 5, 1000);
+        } catch (Exception e) {
+            System.err.printf("Failed to send entry %s after retries: %s\n",
+                    entry.get("id"), e.getMessage());
         }
     }
 
     public static void main(String[] args) {
         if (args.length < 4 || !args[0].equals("-url") || !args[2].equals("-f")) {
-            System.err.println("Usage: java ContentServer.ContentServer -url {server url} -f {local weather filename}");
+            System.err.println("Usage: java ContentServer -url {server url} -f {local weather filename}");
             System.exit(1);
         }
 
@@ -160,9 +173,12 @@ public class ContentServer {
             server.connectToServer();
             server.syncWithServer();
             server.run();
-            server.closeConnection();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+            while(true){
+
+            }
+//            server.closeConnection();
+        } catch (Exception e) {
+            System.err.println(e.getMessage());
         }
     }
 }

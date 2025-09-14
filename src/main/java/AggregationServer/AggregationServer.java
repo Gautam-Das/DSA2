@@ -25,7 +25,6 @@ public class AggregationServer {
         try {
             serverSocket = new ServerSocket(port);
             System.out.printf("Server connected to Socket on port %d\n", port);
-
         } catch (IOException i) {
             System.out.println(i.getMessage());
         }
@@ -67,17 +66,15 @@ public class AggregationServer {
 
                 //TODO: implement a client pool rather than just threads
                 new Thread(new handleConnection(socket, files)).start();
-            } catch (IOException i) {
+            } catch (IOException | NullPointerException i) {
                 System.out.println(i.getMessage());
-            } catch (NullPointerException n) {
-                System.out.println(n.getMessage());
             }
         }
     }
 
     public static void main(String[] args) {
         if (args.length != 2 || !args[0].equals("-p")) {
-            System.err.println("Usage: java Main -p <port>");
+            System.err.println("Usage: java AggregationServer -p <port>");
             System.exit(1);
         }
         String portStr = args[1];
@@ -86,7 +83,36 @@ public class AggregationServer {
             System.exit(1);
         }
         AggregationServer aggregationServer = new AggregationServer(port);
-        //TODO: set up existing files
+
+        // load existing files
+        File dir = new File(".");
+        // only look at json files
+        // ignore -temp.json files
+        File[] jsonFiles = dir.listFiles((file, name) -> name.endsWith(".json") && !name.endsWith("-temp.json"));
+        if (jsonFiles != null) {
+            int maxUpdateCount = 0;
+            int maxLamport = 0;
+
+            for (File file : jsonFiles) {
+                String fileName = file.getName();
+                String stationId = fileName.replace(".json", "");
+                FileHandler handler = new FileHandler(stationId);
+                handler.readFromFile(stationId);
+                aggregationServer.files.put(stationId, handler);
+                // track max counts
+                maxUpdateCount = Math.max(maxUpdateCount, handler.getGlobalUpdateCount());
+                maxLamport = Math.max(maxLamport, handler.getLamportClock());
+
+                System.out.printf("Loaded file for station %s (lamport=%d, updateCount=%d)\n",
+                        stationId, handler.getLamportClock(), handler.getGlobalUpdateCount());
+            }
+
+            // restore counters
+            ServerUpdateCount = maxUpdateCount;
+            ServerLamportClock = maxLamport;
+        }
+        System.out.printf("Starting server with initial lamport: %d , updateCount: %d \n", ServerLamportClock, ServerUpdateCount);
+
         aggregationServer.run();
     }
 }
@@ -95,6 +121,8 @@ class handleConnection implements Runnable {
     private Socket socket = null;
     private String message = "";
     private ConcurrentHashMap<String, FileHandler> files;
+    // used when content server connects to track which station id it is reporting for
+    private String contentServerStationId;
     handleConnection(Socket socket, ConcurrentHashMap<String, FileHandler> files) {
         this.socket = socket;
         this.files = files;
@@ -110,14 +138,34 @@ class handleConnection implements Runnable {
                 DataOutputStream outputStream = new DataOutputStream(socket.getOutputStream())
         ) {
             HTTPParser parser = new HTTPParser();
-
             while (true) {
                 String message;
                 try {
                     // blocks until client sends another message or disconnects
                     message = inputStream.readUTF();
-                } catch (EOFException eof) {
-                    System.out.printf("Client %d closed connection\n", socket.getPort());
+                } catch (IOException eof) {
+
+                    if (contentServerStationId != null) {
+                        FileHandler handler = files.get(contentServerStationId);
+                        if (handler == null ||
+                                !socket.getInetAddress().getHostAddress().equals(handler.getLastHost()) ||
+                                handler.getLastPort() != socket.getPort()
+                        ) {
+                            break;
+                        };
+                        handler.rwLock.writeLock().lock();
+                        try {
+                            handler.deleteFileFromDisk();
+                            files.remove(contentServerStationId, handler);
+                            System.out.printf("Client %s:%d disconnected\n",
+                                    socket.getInetAddress().getHostAddress(),
+                                    socket.getPort());
+                            System.out.printf("deleted %s-json\n", contentServerStationId);
+                        } finally {
+                            handler.rwLock.writeLock().unlock();
+                        }
+
+                    }
                     break; // exit loop and close socket
                 }
 
@@ -333,6 +381,7 @@ class handleConnection implements Runnable {
         }
 
         String stationId = putValidationResult.stationId;
+        contentServerStationId = stationId;
         FileHandler handler = files.putIfAbsent(stationId, new FileHandler(stationId));
 
         // handler is null if stationId doesn't already exist
