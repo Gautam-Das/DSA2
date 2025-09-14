@@ -70,10 +70,10 @@ public class GETClient {
     }
 
 
-    public void run() throws Exception {
+    public String run() throws Exception {
         HTTPParser httpParser = new HTTPParser();
 
-        RetryUtils.withRetries(() -> {
+        return RetryUtils.withRetries(() -> {
             lamportClock++;
             HashMap<String, String> headers = new HashMap<>();
             headers.put("Lamport-Clock", String.valueOf(lamportClock));
@@ -101,7 +101,7 @@ public class GETClient {
             System.out.println("Headers: " + httpResponse.headers);
             System.out.println("Body: " + httpResponse.body);
 
-            return null;
+            return response;
         }, 5,1000);
     }
 

@@ -11,15 +11,15 @@ import shared.UrlManager;
 import java.net.*;
 import java.io.*;
 import java.util.HashMap;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class AggregationServer {
 
     private ServerSocket serverSocket;
-    private ConcurrentHashMap<String, FileHandler> files = new ConcurrentHashMap<>();
+    ConcurrentHashMap<String, FileHandler> files = new ConcurrentHashMap<>();
     public static int ServerLamportClock = 0;
     public static int ServerUpdateCount = 0;
+
     // Constructor with Port
     public AggregationServer(int port) {
         try {
@@ -30,13 +30,47 @@ public class AggregationServer {
         }
     }
 
+    public void getExistingFiles() {
+        // load existing files
+        File dir = new File(".");
+        // only look at json files
+        // ignore -temp.json files
+        File[] jsonFiles = dir.listFiles();
+        if (jsonFiles != null) {
+            int maxUpdateCount = 0;
+            int maxLamport = 0;
+
+            for (File file : jsonFiles) {
+                String fileName = file.getName();
+                if (!fileName.endsWith(".json") || fileName.endsWith("-temp.json")) continue;
+                System.out.println("found file: " + fileName);
+                String stationId = fileName.replace(".json", "");
+                FileHandler handler = new FileHandler(stationId);
+                handler.readFromFile(stationId);
+                files.put(stationId, handler);
+                // track max counts
+                maxUpdateCount = Math.max(maxUpdateCount, handler.getGlobalUpdateCount());
+                maxLamport = Math.max(maxLamport, handler.getLamportClock());
+
+                System.out.printf("Loaded file for station %s (lamport=%d, updateCount=%d)\n",
+                        stationId, handler.getLamportClock(), handler.getGlobalUpdateCount());
+            }
+
+            // restore counters
+            ServerUpdateCount = maxUpdateCount;
+            ServerLamportClock = maxLamport;
+        }
+        System.out.printf("Starting server with initial lamport: %d , updateCount: %d \n", ServerLamportClock, ServerUpdateCount);
+    }
+
     public void run() {
+        getExistingFiles();
         // garbage collection thread to delete files
         new Thread(() -> {
             while (true) {
                 try {
                     Thread.sleep(120_000); // every 2 minutes
-                    for (ConcurrentHashMap.Entry<String, FileHandler> entry : files.entrySet()){
+                    for (ConcurrentHashMap.Entry<String, FileHandler> entry : files.entrySet()) {
                         String id = entry.getKey();
                         FileHandler handler = entry.getValue();
                         handler.rwLock.writeLock().lock();
@@ -51,7 +85,8 @@ public class AggregationServer {
                         }
 
                     }
-                } catch (InterruptedException ignored) {}
+                } catch (InterruptedException ignored) {
+                }
             }
         }).start();
 
@@ -84,35 +119,6 @@ public class AggregationServer {
         }
         AggregationServer aggregationServer = new AggregationServer(port);
 
-        // load existing files
-        File dir = new File(".");
-        // only look at json files
-        // ignore -temp.json files
-        File[] jsonFiles = dir.listFiles((file, name) -> name.endsWith(".json") && !name.endsWith("-temp.json"));
-        if (jsonFiles != null) {
-            int maxUpdateCount = 0;
-            int maxLamport = 0;
-
-            for (File file : jsonFiles) {
-                String fileName = file.getName();
-                String stationId = fileName.replace(".json", "");
-                FileHandler handler = new FileHandler(stationId);
-                handler.readFromFile(stationId);
-                aggregationServer.files.put(stationId, handler);
-                // track max counts
-                maxUpdateCount = Math.max(maxUpdateCount, handler.getGlobalUpdateCount());
-                maxLamport = Math.max(maxLamport, handler.getLamportClock());
-
-                System.out.printf("Loaded file for station %s (lamport=%d, updateCount=%d)\n",
-                        stationId, handler.getLamportClock(), handler.getGlobalUpdateCount());
-            }
-
-            // restore counters
-            ServerUpdateCount = maxUpdateCount;
-            ServerLamportClock = maxLamport;
-        }
-        System.out.printf("Starting server with initial lamport: %d , updateCount: %d \n", ServerLamportClock, ServerUpdateCount);
-
         aggregationServer.run();
     }
 }
@@ -123,10 +129,12 @@ class handleConnection implements Runnable {
     private ConcurrentHashMap<String, FileHandler> files;
     // used when content server connects to track which station id it is reporting for
     private String contentServerStationId;
+
     handleConnection(Socket socket, ConcurrentHashMap<String, FileHandler> files) {
         this.socket = socket;
         this.files = files;
     }
+
     private static final Object clockLock = new Object();
 
     @Override
@@ -152,7 +160,8 @@ class handleConnection implements Runnable {
                                 handler.getLastPort() != socket.getPort()
                         ) {
                             break;
-                        };
+                        }
+                        ;
                         handler.rwLock.writeLock().lock();
                         try {
                             handler.deleteFileFromDisk();
@@ -203,7 +212,8 @@ class handleConnection implements Runnable {
         } finally {
             try {
                 socket.close();
-            } catch (IOException ignored) {}
+            } catch (IOException ignored) {
+            }
         }
     }
 
@@ -389,7 +399,7 @@ class handleConnection implements Runnable {
             // if newly created that status must be 201
             putValidationResult.status = 201;
             putValidationResult.message = "Created";
-            handler  = files.get(stationId);
+            handler = files.get(stationId);
         }
 
         System.out.println("SAVING TO FILE:");
@@ -406,8 +416,16 @@ class handleConnection implements Runnable {
         HTTPParser httpParser = new HTTPParser();
         HashMap<String, String> headers = new HashMap<>();
 
+        String requestLamportString = request.headers.get("Lamport-Clock");
+        int requestLamportNumber = 0;
+        if (requestLamportString != null){
+            try {
+                requestLamportNumber = Integer.valueOf(requestLamportString);
+            } catch (Exception ignored) {}
+        }
+
         synchronized (clockLock) {
-            AggregationServer.ServerLamportClock++;
+            AggregationServer.ServerLamportClock = Math.max(AggregationServer.ServerLamportClock, requestLamportNumber) + 1;
             headers.put("Lamport-Clock", String.valueOf(AggregationServer.ServerLamportClock));
         }
 
